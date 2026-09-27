@@ -207,7 +207,7 @@ def signal_h6(df):
 # ─── Backtest Engine ────────────────────────────────────────────
 
 def backtest_signal(df, signal_series, hold_days=5, label="H?",
-                    stop_loss_atr=2.0):
+                    stop_loss_atr=None):
     """
     stop_loss_atr: exit early if price drops > N x ATR14 from entry
     """
@@ -227,19 +227,19 @@ def backtest_signal(df, signal_series, hold_days=5, label="H?",
         if pd.isna(entry_price) or entry_price <= 0:
             continue
 
-        atr        = atrs[i]
-        stop_price = entry_price - (stop_loss_atr * atr)
-
         exit_price = None
         exit_date  = None
         stopped    = False
 
-        for j in range(i + 1, min(i + hold_days + 1, len(df))):
-            if lows[j] <= stop_price:
-                exit_price = stop_price   # assume stop hit at stop price
-                exit_date  = dates[j]
-                stopped    = True
-                break
+        if stop_loss_atr is not None:
+            atr        = atrs[i]
+            stop_price = entry_price - (stop_loss_atr * atr)
+            for j in range(i + 1, min(i + hold_days + 1, len(df))):
+                if lows[j] <= stop_price:
+                    exit_price = stop_price
+                    exit_date  = dates[j]
+                    stopped    = True
+                    break
 
         if not stopped:
             exit_price = closes[i + hold_days]
@@ -302,16 +302,22 @@ def calc_metrics(trades_df, label="", hold_days=5):
 
 # ─── Main Runner ────────────────────────────────────────────────
 
-def run_backtest(max_stocks=30, hold_days=15, period="2y", oos=False):
+def run_backtest(max_stocks=None, hold_days=20, period="5y",
+                 oos=False, regime_stratified=False):
     dataset_name = "OUT-OF-SAMPLE (TEST SET)" if oos else "IN-SAMPLE (TRAIN SET)"
-    suffix       = "oos" if oos else "train"
+    if regime_stratified:
+        dataset_name += " [REGIME-STRATIFIED]"
+    suffix = "oos" if oos else "train"
+    if regime_stratified:
+        suffix += "_regime"
 
     print("\n" + "=" * 60)
     print("=== PulseAlgo Backtester ===")
     print("=" * 60)
     print(f"Dataset : {dataset_name}")
     print(f"Period  : {period} | Hold: {hold_days}d | Cost: {ROUND_TRIP_COST*100:.2f}%")
-    print(f"Universe: up to {max_stocks} stocks\n")
+    print(f"Mode    : {'Regime-Stratified Split' if regime_stratified else 'Time-Based Split'}")
+    print(f"Universe: up to {max_stocks or 'ALL'} stocks\n")
 
     symbols = get_yf_symbols()
     if max_stocks:
@@ -319,6 +325,19 @@ def run_backtest(max_stocks=30, hold_days=15, period="2y", oos=False):
 
     print("  Fetching NIFTY 50 regime data...")
     nifty_df = fetch_nifty_regime(period=period)
+
+    # Build bull regime date mask from NIFTY
+    bull_dates = set()
+    if nifty_df is not None:
+        nifty_feat = nifty_df.copy()
+        nifty_feat["EMA50"]  = calculate_ema(nifty_feat["Close"], 50)
+        nifty_feat["EMA200"] = calculate_ema(nifty_feat["Close"], 200)
+        bull_mask = (
+            (nifty_feat["Close"] > nifty_feat["EMA50"]) &
+            (nifty_feat["EMA50"] > nifty_feat["EMA200"])
+        )
+        bull_dates = set(nifty_feat.index[bull_mask])
+        print(f"  Bull regime days: {len(bull_dates)} of {len(nifty_feat)} total")
 
     all_trades = {"H5_52wHigh": [], "H6_DelivMomentum": []}
     processed  = 0
@@ -333,8 +352,19 @@ def run_backtest(max_stocks=30, hold_days=15, period="2y", oos=False):
         if len(df) < 60:
             continue
 
-        split    = int(len(df) * 0.70)
-        df_part  = df.iloc[split:] if oos else df.iloc[:split]
+        if regime_stratified:
+            # Filter to bull regime dates only
+            df_bull = df[df.index.isin(bull_dates)].copy()
+            if len(df_bull) < 40:
+                continue
+
+            # Split bull dates 60/40
+            split = int(len(df_bull) * 0.60)
+            df_part = df_bull.iloc[split:] if oos else df_bull.iloc[:split]
+        else:
+            # Standard time-based split
+            split   = int(len(df) * 0.70)
+            df_part = df.iloc[split:] if oos else df.iloc[:split]
 
         if len(df_part) <= hold_days + 1:
             continue
@@ -343,9 +373,9 @@ def run_backtest(max_stocks=30, hold_days=15, period="2y", oos=False):
             ("H5_52wHigh",       signal_h5),
             ("H6_DelivMomentum", signal_h6),
         ]:
-        
             sig = sig_fn(df_part)
-            trd = backtest_signal(df_part, sig, hold_days=hold_days, label=label)
+            trd = backtest_signal(df_part, sig, hold_days=hold_days,
+                                  label=label, stop_loss_atr=None)
             if not trd.empty:
                 trd["ticker"]  = ticker.replace(".NS", "")
                 trd["dataset"] = "OOS" if oos else "TRAIN"
@@ -388,9 +418,14 @@ def run_backtest(max_stocks=30, hold_days=15, period="2y", oos=False):
             pd.concat(trade_list, ignore_index=True).to_csv(
                 f"data/backtest/trades_{label}_{suffix}_{today}.csv", index=False)
 
-    print(f"\nStocks tested: {processed} | Hold: {hold_days}d | Dataset: {dataset_name}")
+    print(f"\nStocks: {processed} | Hold: {hold_days}d | {dataset_name}")
     print("Acceptance: Win Rate > 55%, Sharpe > 0.5, Trades > 50\n")
 
-
 if __name__ == "__main__":
-    run_backtest(max_stocks=None, hold_days=20, period="5y", oos=False)
+    # Regime-stratified: train on 60% of bull dates
+    run_backtest(max_stocks=None, hold_days=20, period="5y",
+                 oos=False, regime_stratified=True)
+
+    # Regime-stratified: test on remaining 40% of bull dates
+    run_backtest(max_stocks=None, hold_days=20, period="5y",
+                 oos=True, regime_stratified=True)
