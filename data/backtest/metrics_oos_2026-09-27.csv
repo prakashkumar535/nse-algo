@@ -1,0 +1,5 @@
+Hypothesis,Trades,Win Rate %,Avg Net Ret %,Avg Win %,Avg Loss %,Profit Factor,Sharpe,Max Drawdown %,Expectancy %
+H1_VolSurge,163,36.8,-0.42,2.71,-2.24,0.7,-0.99,-62.98,-0.42
+H2_RSIMomentum,179,38.0,-0.46,2.2,-2.11,0.65,-1.22,-65.03,-0.46
+H3_EMAAlign,1263,41.6,-0.47,1.76,-2.06,0.61,-1.32,-99.92,-0.47
+H4_MeanRevert,38,39.5,-0.84,2.39,-2.94,0.53,-1.92,-30.25,-0.84
