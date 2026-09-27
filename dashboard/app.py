@@ -1,7 +1,11 @@
+import sys
+import os
 import streamlit as st
 import pandas as pd
-import os
 from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'dashboard'))
+from paper_trades import load_trades, add_trade, close_trade, get_summary
 
 st.set_page_config(
     page_title="PulseAlgo",
@@ -65,11 +69,12 @@ regime     = load_regime()
 bt_df      = load_backtest()
 
 # ─── TAB LAYOUT ─────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🏠 Market Overview",
     "🔍 H5 Watchlist",
     "📊 Backtest Results",
     "📋 All Signals",
+    "📝 Paper Trading",
 ])
 
 # ════════════════════════════════════════════════════════════════
@@ -292,3 +297,168 @@ with tab4:
         st.dataframe(styled, use_container_width=True)
     else:
         st.warning("No signal data. Run `python src/signal_engine.py` first.")
+
+        # ════════════════════════════════════════════════════════════════
+# TAB 5 — Paper Trading Journal
+# ════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("📝 Paper Trading Journal")
+    st.caption(
+        "Track H5 and Momentum paper trades. "
+        "Minimum 20 closed trades before considering live capital."
+    )
+
+    # ── Summary metrics ─────────────────────────────────────────
+    summary = get_summary()
+    total   = summary.get("total", 0)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total Trades",  summary.get("total", 0))
+    c2.metric("Open",          summary.get("open", 0))
+    c3.metric("Closed",        summary.get("closed", 0))
+    c4.metric("Win Rate",      f"{summary.get('win_rate', 0)}%" if summary.get('closed', 0) > 0 else "—")
+    c5.metric("Avg Net Ret",   f"{summary.get('avg_ret', 0)}%" if summary.get('closed', 0) > 0 else "—")
+
+    if summary.get("closed", 0) > 0:
+        c6, c7, c8 = st.columns(3)
+        c6.metric("Best Trade",    f"{summary.get('best_trade', 0)}%")
+        c7.metric("Worst Trade",   f"{summary.get('worst_trade', 0)}%")
+        c8.metric("Profit Factor", summary.get("profit_factor", 0))
+
+    # Progress toward live trading
+    closed_count = summary.get("closed", 0)
+    target       = 20
+    progress     = min(closed_count / target, 1.0)
+    st.divider()
+    st.markdown(f"**Progress to live trading: {closed_count}/{target} trades**")
+    st.progress(progress)
+    if closed_count < target:
+        st.warning(
+            f"⚠️ {target - closed_count} more closed trades needed "
+            f"before considering live capital."
+        )
+    else:
+        st.success(
+            "✅ Minimum paper trades reached. "
+            "Review metrics carefully before going live."
+        )
+
+    st.divider()
+
+    # ── Add new trade ────────────────────────────────────────────
+    with st.expander("➕ Add New Paper Trade", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            pt_strategy    = st.selectbox("Strategy", ["H5_52wHigh", "MOMENTUM", "OTHER"])
+            pt_ticker      = st.text_input("Ticker (e.g. RELIANCE)").upper().strip()
+            pt_entry_date  = st.date_input("Entry Date")
+            pt_entry_price = st.number_input("Entry Price (₹)", min_value=0.01, step=0.05)
+        with col2:
+            pt_qty         = st.number_input("Qty (shares)", min_value=1, step=1, value=1)
+            pt_regime      = st.selectbox("Regime at Entry", ["BULL", "STRONG_BULL", "SIDEWAYS", "BEAR"])
+            pt_nifty       = st.number_input("NIFTY at Entry", min_value=0.0, step=1.0)
+            pt_notes       = st.text_area("Notes", placeholder="Why did you take this trade?", height=80)
+
+        if st.button("✅ Add Trade", type="primary"):
+            if pt_ticker and pt_entry_price > 0:
+                trade_id = add_trade(
+                    strategy        = pt_strategy,
+                    ticker          = pt_ticker,
+                    entry_date      = str(pt_entry_date),
+                    entry_price     = pt_entry_price,
+                    qty             = int(pt_qty),
+                    regime_at_entry = pt_regime,
+                    nifty_at_entry  = pt_nifty,
+                    notes           = pt_notes,
+                )
+                st.success(f"Trade added: {trade_id}")
+                st.rerun()
+            else:
+                st.error("Enter ticker and entry price.")
+
+    # ── Close existing trade ─────────────────────────────────────
+    trades_df = load_trades()
+    open_trades = trades_df[trades_df["status"] == "OPEN"] if not trades_df.empty else pd.DataFrame()
+
+    if not open_trades.empty:
+        with st.expander("🔒 Close a Trade", expanded=False):
+            trade_options = open_trades.apply(
+                lambda r: f"{r['trade_id']} — {r['ticker']} @ ₹{r['entry_price']} ({r['strategy']})",
+                axis=1
+            ).tolist()
+            selected = st.selectbox("Select trade to close", trade_options)
+            trade_id_close = selected.split(" — ")[0] if selected else None
+
+            col1, col2 = st.columns(2)
+            with col1:
+                cl_exit_date  = st.date_input("Exit Date", key="exit_date")
+                cl_exit_price = st.number_input("Exit Price (₹)", min_value=0.01, step=0.05, key="exit_price")
+            with col2:
+                cl_reason = st.selectbox("Exit Reason", ["SIGNAL", "STOP", "REGIME_EXIT", "MANUAL"])
+                cl_notes  = st.text_area("Exit Notes", height=80, key="exit_notes")
+
+            if st.button("🔒 Close Trade", type="primary"):
+                result = close_trade(
+                    trade_id    = trade_id_close,
+                    exit_date   = str(cl_exit_date),
+                    exit_price  = cl_exit_price,
+                    exit_reason = cl_reason,
+                    notes       = cl_notes,
+                )
+                if result:
+                    ret_color = "🟢" if result["net_ret"] > 0 else "🔴"
+                    st.success(
+                        f"{ret_color} Trade closed: {result['ticker']} | "
+                        f"Net: {result['net_ret']}% | "
+                        f"Held: {result['hold_days']} days"
+                    )
+                    st.rerun()
+
+    st.divider()
+
+    # ── Trade log ────────────────────────────────────────────────
+    st.subheader("Trade Log")
+
+    if trades_df.empty:
+        st.info(
+            "No paper trades yet. "
+            "Wait for BULL regime → H5 signal fires → add trade above."
+        )
+    else:
+        # Color code
+        def color_status(val):
+            if val == "OPEN":   return "background-color:#0d2a4a; color:#58a6ff"
+            if val == "CLOSED": return "background-color:#1a2a1a; color:#3fb950"
+            return ""
+
+        def color_ret(val):
+            try:
+                v = float(val)
+                if v > 0:  return "color:#3fb950; font-weight:bold"
+                if v < 0:  return "color:#f85149; font-weight:bold"
+            except:
+                pass
+            return ""
+
+        show_cols = [c for c in [
+            "trade_id", "strategy", "ticker",
+            "entry_date", "entry_price",
+            "exit_date", "exit_price",
+            "net_ret_pct", "hold_days",
+            "exit_reason", "regime_at_entry", "status", "notes"
+        ] if c in trades_df.columns]
+
+        styled = trades_df[show_cols].style\
+            .map(color_status, subset=["status"])\
+            .map(color_ret,    subset=["net_ret_pct"])
+
+        st.dataframe(styled, use_container_width=True)
+
+        # Export
+        csv = trades_df.to_csv(index=False)
+        st.download_button(
+            "⬇️ Export Journal CSV",
+            data=csv,
+            file_name=f"paper_trades_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
