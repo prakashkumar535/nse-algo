@@ -107,3 +107,56 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+def run_with_alerts():
+    """Run signal engine + send Telegram alerts."""
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from alerts import (
+        alert_daily_summary, alert_regime_change,
+        alert_h5_signal, load_previous_regime, save_regime_cache
+    )
+
+    # Run signals
+    run()
+
+    # Load results
+    try:
+        signals_df = pd.read_csv("data/latest_signal.csv")
+        regime_df  = pd.read_csv("data/latest_regime.csv")
+        regime     = regime_df.iloc[0]["regime"]
+        nifty      = float(regime_df.iloc[0]["close"])
+        buy_count  = len(signals_df[signals_df["Signal"] == "BUY"])
+        sell_count = len(signals_df[signals_df["Signal"] == "SELL"])
+        hold_count = len(signals_df[signals_df["Signal"] == "HOLD"])
+
+        top_buys = signals_df[
+            signals_df["Signal"] == "BUY"
+        ].sort_values("Confidence", ascending=False).head(3).to_dict("records")
+
+        # Check regime change
+        prev_regime = load_previous_regime()
+        if prev_regime != "UNKNOWN" and prev_regime != regime:
+            print(f"  Regime changed: {prev_regime} → {regime}")
+            alert_regime_change(prev_regime, regime, nifty)
+
+        save_regime_cache(regime)
+
+        # Daily summary
+        alert_daily_summary(
+            regime=regime,
+            buy_count=buy_count,
+            sell_count=sell_count,
+            hold_count=hold_count,
+            nifty=nifty,
+            top_buys=top_buys,
+        )
+
+        # H5 candidates alert (if regime is bull)
+        if regime in ("BULL", "STRONG_BULL") and buy_count > 0:
+            alert_h5_signal(top_buys)
+
+        print("  Alerts sent.")
+
+    except Exception as e:
+        print(f"  Alert error: {e}")

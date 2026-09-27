@@ -2,8 +2,8 @@ name: PulseAlgo Daily Signal
 
 on:
   schedule:
-    - cron: '30 10 * * 1-5'  # 4PM IST = 10:30 UTC, Mon-Fri
-  workflow_dispatch:          # manual trigger anytime
+    - cron: '30 10 * * 1-5'  # 4PM IST = 10:30 UTC Mon-Fri
+  workflow_dispatch:
 
 jobs:
   run-signal:
@@ -21,10 +21,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run signal engine
+      - name: Run signal engine + alerts
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           cd src
-          python signal_engine.py
+          python -c "
+          import sys, os
+          sys.path.insert(0, '.')
+          from signal_engine import run_with_alerts
+          run_with_alerts()
+          "
 
       - name: Commit and push data
         run: |
